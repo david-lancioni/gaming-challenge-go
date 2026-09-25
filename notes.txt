@@ -1,0 +1,24 @@
+É um serviço de carteiras de jogadores para apostas online. Provedores de jogos (o "cassino" que hospeda o jogo) avisam ao serviço o que aconteceu numa rodada, e ele movimenta o saldo do jogador com precisão de centavos e sem nunca duplicar nem perder dinheiro, mesmo com várias instâncias rodando e falhas no meio do caminho.
+
+O fluxo básico
+
+Um serviço interno abre uma carteira para um jogador (POST /wallets), com saldo inicial opcional.
+O provedor envia operações sobre essa carteira:
+BET: aposta, debita o valor (só se houver saldo).
+WIN: prêmio, credita.
+LOSS: perda, não mexe no saldo (só registra).
+REFUND: devolve uma aposta inteira.
+ROLLBACK: desfaz uma aposta, prêmio ou reembolso.
+Cada mudança de saldo gera um lançamento no ledger, um extrato que só recebe novas linhas e nunca é editado. Saldo = soma dos créditos − débitos do ledger; há um endpoint de reconciliação que confere isso.
+Depois de cada operação, o serviço publica eventos (WagerTransactionProcessed, WalletBalanceChanged etc.) numa fila para outros sistemas consumirem.
+Como as operações chegam: por HTTP ou por uma fila SQS. Os dois caminhos usam o mesmo código e as mesmas garantias.
+
+O que o torna mais que um CRUD (é o foco do desafio):
+
+Idempotência. Provedores reenviam a mesma operação quando a rede falha. O serviço reconhece pela chave e devolve o resultado original em vez de debitar de novo.
+Concorrência. Se duas apostas de 80 chegam ao mesmo tempo numa carteira de 100, exatamente uma passa. Cada carteira é travada individualmente; carteiras diferentes andam em paralelo.
+Reversão antes da referência. Um REFUND pode chegar antes da aposta que ele desfaz. Ele fica pendente e um worker tenta de novo com backoff até a aposta aparecer ou o prazo acabar.
+Recuperação de falhas. Se uma instância morre no meio, outra continua. Os eventos só saem depois do commit no banco (padrão transactional outbox), e mensagens repetidas são descartadas por uma inbox.
+Regras no banco. Saldo negativo, ledger editado e saldo divergente do ledger são impedidos por constraints e triggers no PostgreSQL, não só pelo código.
+Autenticação. Tudo passa por tokens do Keycloak. Cada provedor só vê e opera as próprias transações.
+Em resumo: é o "núcleo financeiro" de uma plataforma de apostas, escrito para ser correto mesmo quando tudo ao redor falha. Pode perguntar o que quiser sobre qualquer parte: o código, uma decisão de arquitetura, os testes ou como rodar

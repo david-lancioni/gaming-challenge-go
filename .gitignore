@@ -1,0 +1,16 @@
+# Binaries and build output
+/bin/
+/wagering
+/wagering.exe
+*.test
+*.out
+coverage.*
+
+# Local configuration (never commit real secrets)
+.env
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

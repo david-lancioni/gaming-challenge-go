@@ -1,0 +1,306 @@
+{
+  "info": {
+    "name": "Wagering API (local)",
+    "description": "Chamadas da API de apostas contra o ambiente do docker compose.\n\nOs tokens do Keycloak são obtidos e renovados automaticamente pelo script da collection. Rode as requisições na ordem: 'Abrir carteira' gera um jogador novo e guarda o walletId; as seguintes usam esses valores.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8081" },
+    { "key": "keycloakUrl", "value": "http://localhost:8080" },
+    { "key": "playerId", "value": "" },
+    { "key": "walletId", "value": "" },
+    { "key": "betId", "value": "" },
+    { "key": "transactionId", "value": "" },
+    { "key": "internalToken", "value": "" },
+    { "key": "providerToken", "value": "" },
+    { "key": "providerBToken", "value": "" }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Obtém (e renova antes de expirar) os tokens client_credentials do Keycloak.",
+          "const kc = pm.variables.get('keycloakUrl');",
+          "function ensure(client, varName) {",
+          "  const exp = Number(pm.collectionVariables.get(varName + 'Exp') || 0);",
+          "  if (pm.collectionVariables.get(varName) && Date.now() < exp) return;",
+          "  pm.sendRequest({",
+          "    url: kc + '/realms/wagering/protocol/openid-connect/token',",
+          "    method: 'POST',",
+          "    body: { mode: 'urlencoded', urlencoded: [",
+          "      { key: 'grant_type', value: 'client_credentials' },",
+          "      { key: 'client_id', value: client },",
+          "      { key: 'client_secret', value: client + '-secret' }",
+          "    ] }",
+          "  }, (err, res) => {",
+          "    if (err || res.code !== 200) { console.error('falha ao obter token de ' + client, err || res.text()); return; }",
+          "    const b = res.json();",
+          "    pm.collectionVariables.set(varName, b.access_token);",
+          "    pm.collectionVariables.set(varName + 'Exp', Date.now() + (b.expires_in - 30) * 1000);",
+          "  });",
+          "}",
+          "ensure('wallet-service', 'internalToken');",
+          "ensure('provider-a', 'providerToken');",
+          "ensure('provider-b', 'providerBToken');",
+          "",
+          "// Valores usados pelas requisições, criados se ainda não existirem.",
+          "if (!pm.collectionVariables.get('playerId')) pm.collectionVariables.set('playerId', pm.variables.replaceIn('{{$guid}}'));",
+          "if (!pm.collectionVariables.get('betId')) pm.collectionVariables.set('betId', 'bet-' + Date.now());"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// As requisições 2 em diante precisam de uma carteira aberta pela requisição 1.",
+          "const url = pm.request.url.toString();",
+          "const body = (pm.request.body && pm.request.body.raw) || '';",
+          "const usesEmptyWallet = /\\/wallets\\/(\\/|\\?|$)/.test(url) || /\"walletId\":\\s*\"\"/.test(body);",
+          "if (usesEmptyWallet && !pm.collectionVariables.get('walletId')) {",
+          "  pm.test('Nenhuma carteira aberta: rode primeiro \"1. Abrir carteira\"', () => pm.expect.fail('walletId vazio'));",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Health (ready)",
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "GET",
+        "url": "{{baseUrl}}/health/ready"
+      }
+    },
+    {
+      "name": "1. Abrir carteira (1000.00 BRL)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Novo jogador e novo id de aposta a cada execução.",
+              "pm.collectionVariables.set('playerId', pm.variables.replaceIn('{{$guid}}'));",
+              "pm.collectionVariables.set('betId', 'bet-' + Date.now());"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('walletId', pm.response.json().id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{internalToken}}", "type": "string" }] },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"playerId\": \"{{playerId}}\",\n  \"initialBalance\": { \"amount\": \"1000.00\", \"currency\": \"BRL\" }\n}"
+        },
+        "url": "{{baseUrl}}/wallets"
+      }
+    },
+    {
+      "name": "2. Aposta BET 25.00",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const b = pm.response.json();",
+              "pm.test('PROCESSED', () => pm.expect(b.status).to.eql('PROCESSED'));",
+              "if (b.transactionId) pm.collectionVariables.set('transactionId', b.transactionId);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "provider-a:{{betId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"providerId\": \"provider-a\",\n  \"externalTransactionId\": \"{{betId}}\",\n  \"playerId\": \"{{playerId}}\",\n  \"walletId\": \"{{walletId}}\",\n  \"roundId\": \"round-1\",\n  \"gameId\": \"fortune-chimp\",\n  \"kind\": \"BET\",\n  \"money\": { \"amount\": \"25.00\", \"currency\": \"BRL\" }\n}"
+        },
+        "url": "{{baseUrl}}/wagering/transactions"
+      }
+    },
+    {
+      "name": "3. Repetir a mesma aposta (replay idempotente)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('idempotentReplay = true, saldo original', () => {",
+              "  const b = pm.response.json();",
+              "  pm.expect(b.idempotentReplay).to.eql(true);",
+              "  pm.expect(b.balance.amount).to.eql('975.00');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "provider-a:{{betId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"providerId\": \"provider-a\",\n  \"externalTransactionId\": \"{{betId}}\",\n  \"playerId\": \"{{playerId}}\",\n  \"walletId\": \"{{walletId}}\",\n  \"roundId\": \"round-1\",\n  \"gameId\": \"fortune-chimp\",\n  \"kind\": \"BET\",\n  \"money\": { \"amount\": \"25.00\", \"currency\": \"BRL\" }\n}"
+        },
+        "url": "{{baseUrl}}/wagering/transactions"
+      }
+    },
+    {
+      "name": "4. Mesma chave, valor diferente (409)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('409 Conflict', () => pm.response.to.have.status(409));"]
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "provider-a:{{betId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"providerId\": \"provider-a\",\n  \"externalTransactionId\": \"{{betId}}\",\n  \"playerId\": \"{{playerId}}\",\n  \"walletId\": \"{{walletId}}\",\n  \"roundId\": \"round-1\",\n  \"gameId\": \"fortune-chimp\",\n  \"kind\": \"BET\",\n  \"money\": { \"amount\": \"99.00\", \"currency\": \"BRL\" }\n}"
+        },
+        "url": "{{baseUrl}}/wagering/transactions"
+      }
+    },
+    {
+      "name": "5. Prêmio WIN 50.00",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "provider-a:win-{{betId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"providerId\": \"provider-a\",\n  \"externalTransactionId\": \"win-{{betId}}\",\n  \"playerId\": \"{{playerId}}\",\n  \"walletId\": \"{{walletId}}\",\n  \"roundId\": \"round-1\",\n  \"gameId\": \"fortune-chimp\",\n  \"kind\": \"WIN\",\n  \"money\": { \"amount\": \"50.00\", \"currency\": \"BRL\" }\n}"
+        },
+        "url": "{{baseUrl}}/wagering/transactions"
+      }
+    },
+    {
+      "name": "6. Perda LOSS 0.00",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "provider-a:loss-{{betId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"providerId\": \"provider-a\",\n  \"externalTransactionId\": \"loss-{{betId}}\",\n  \"playerId\": \"{{playerId}}\",\n  \"walletId\": \"{{walletId}}\",\n  \"roundId\": \"round-2\",\n  \"gameId\": \"fortune-chimp\",\n  \"kind\": \"LOSS\",\n  \"money\": { \"amount\": \"0.00\", \"currency\": \"BRL\" }\n}"
+        },
+        "url": "{{baseUrl}}/wagering/transactions"
+      }
+    },
+    {
+      "name": "7. Reembolso REFUND da aposta",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "provider-a:refund-{{betId}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"providerId\": \"provider-a\",\n  \"externalTransactionId\": \"refund-{{betId}}\",\n  \"playerId\": \"{{playerId}}\",\n  \"walletId\": \"{{walletId}}\",\n  \"roundId\": \"round-1\",\n  \"gameId\": \"fortune-chimp\",\n  \"kind\": \"REFUND\",\n  \"money\": { \"amount\": \"25.00\", \"currency\": \"BRL\" },\n  \"referenceExternalTransactionId\": \"{{betId}}\"\n}"
+        },
+        "url": "{{baseUrl}}/wagering/transactions"
+      }
+    },
+    {
+      "name": "8. Consultar carteira",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{internalToken}}", "type": "string" }] },
+        "method": "GET",
+        "url": "{{baseUrl}}/wallets/{{walletId}}"
+      }
+    },
+    {
+      "name": "9. Extrato (ledger)",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{internalToken}}", "type": "string" }] },
+        "method": "GET",
+        "url": "{{baseUrl}}/wallets/{{walletId}}/ledger?limit=50"
+      }
+    },
+    {
+      "name": "10. Reconciliação",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{internalToken}}", "type": "string" }] },
+        "method": "POST",
+        "url": "{{baseUrl}}/wallets/{{walletId}}/reconciliation"
+      }
+    },
+    {
+      "name": "11. Transação por id interno",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "GET",
+        "url": "{{baseUrl}}/wagering/transactions/{{transactionId}}"
+      }
+    },
+    {
+      "name": "12. Transação por provedor + id externo",
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerToken}}", "type": "string" }] },
+        "method": "GET",
+        "url": "{{baseUrl}}/providers/provider-a/wagering/transactions/{{betId}}"
+      }
+    },
+    {
+      "name": "13. provider-b tentando ler transação do provider-a (negado)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": ["pm.test('acesso negado', () => pm.expect(pm.response.code).to.be.oneOf([403, 404]));"]
+          }
+        }
+      ],
+      "request": {
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{providerBToken}}", "type": "string" }] },
+        "method": "GET",
+        "url": "{{baseUrl}}/wagering/transactions/{{transactionId}}"
+      }
+    }
+  ]
+}
