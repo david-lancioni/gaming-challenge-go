@@ -17,7 +17,7 @@ persistente, ledger append-only, *inbox/outbox* e autenticação OAuth 2.0/OIDC 
 5. [Filas SQS](#filas-sqs)
 6. [Executando o serviço fora do Docker](#executando-o-serviço-fora-do-docker)
 7. [Autenticação e identidades de teste](#autenticação-e-identidades-de-teste)
-8. [Exemplos de chamadas](#exemplos-de-chamadas)
+8. [Consumindo a API com o Postman](#consumindo-a-api-com-o-postman)
 9. [Mensagens SQS de exemplo](#mensagens-sqs-de-exemplo)
 10. [Testes](#testes)
 11. [Simulações de falha](#simulações-de-falha)
@@ -55,11 +55,11 @@ e **três instâncias independentes** do serviço:
 | LocalStack | http://localhost:4566 | |
 
 As três instâncias compartilham apenas o banco e as filas; qualquer uma atende HTTP, consome
-SQS, publica o outbox e retoma pendências. Verifique:
-
-```sh
-curl -s localhost:8081/health/ready    # {"checks":{"postgres":"UP","sqs":"UP"},"status":"UP"}
-```
+SQS, publica o outbox e retoma pendências. Para verificar, envie a requisição
+`0. Health (ready)` da collection do Postman (veja
+[Consumindo a API com o Postman](#consumindo-a-api-com-o-postman)) ou abra
+http://localhost:8081/health/ready no navegador. A resposta esperada é
+`{"checks":{"postgres":"UP","sqs":"UP"},"status":"UP"}`.
 
 Para parar e limpar: `docker compose down -v`.
 
@@ -153,83 +153,113 @@ O realm `wagering` é provisionado por [`deploy/keycloak/wagering-realm.json`](d
 | `wrong-audience-client` | `wrong-audience-client-secret` | provider | audiência errada (`401`) |
 | `expiring-provider` | `expiring-provider-secret` | provider | token de 1 s (teste de expiração) |
 
-Obtendo tokens:
-
-```sh
-tok() { curl -s http://localhost:8080/realms/wagering/protocol/openid-connect/token \
-  -d grant_type=client_credentials -d client_id="$1" -d client_secret="$1-secret" | jq -r .access_token; }
-INTERNAL=$(tok wallet-service)
-PROVIDER=$(tok provider-a)
-```
-
-```powershell
-function tok($c) { (Invoke-RestMethod -Method Post -Uri http://localhost:8080/realms/wagering/protocol/openid-connect/token `
-  -Body @{grant_type='client_credentials'; client_id=$c; client_secret="$c-secret"}).access_token }
-$INTERNAL = tok 'wallet-service'; $PROVIDER = tok 'provider-a'
-```
-
 Sem token → `401`; com token sem permissão → `403`. Os tokens duram 5 minutos.
 
-## Exemplos de chamadas
+**Na collection do Postman os tokens são automáticos.** O script da collection obtém os
+tokens de `wallet-service`, `provider-a` e `provider-b`, guarda-os nas variáveis
+`internalToken`, `providerToken` e `providerBToken` e os renova antes de expirarem. Cada
+requisição já usa o token certo na aba **Authorization**.
 
-```sh
-API=http://localhost:8081
-PLAYER=$(uuidgen | tr A-Z a-z)
+Para testar outra identidade (por exemplo, `no-role-client` para ver o `403`), configure a
+aba **Authorization** da requisição no Postman:
 
-# 1. Abrir carteira (serviço interno) — 201
-curl -s -X POST $API/wallets -H "Authorization: Bearer $INTERNAL" -H 'Content-Type: application/json' \
-  -d "{\"playerId\":\"$PLAYER\",\"initialBalance\":{\"amount\":\"1000.00\",\"currency\":\"BRL\"}}"
-WALLET=<id retornado>
+| Campo | Valor |
+| --- | --- |
+| Auth Type | `OAuth 2.0` |
+| Grant Type | `Client Credentials` |
+| Access Token URL | `http://localhost:8080/realms/wagering/protocol/openid-connect/token` |
+| Client ID | o `client_id` da tabela acima |
+| Client Secret | o `secret` da tabela acima |
+| Client Authentication | `Send client credentials in body` |
 
-# 2. Enviar uma aposta (provedor) — 200 {"status":"PROCESSED","balance":{"amount":"975.00",...}}
-curl -s -X POST $API/wagering/transactions \
-  -H "Authorization: Bearer $PROVIDER" -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: provider-a:transaction-123' \
-  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"transaction-123\",\"playerId\":\"$PLAYER\",
-       \"walletId\":\"$WALLET\",\"roundId\":\"round-987\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",
-       \"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+Clique em **Get New Access Token** e depois em **Use Token**.
 
-# 3. Repetir exatamente a mesma chamada → 200 com "idempotentReplay": true (mesmo saldo original)
-# 4. Mesma chave com valor diferente → 409 IDEMPOTENCY_KEY_CONFLICT
+## Consumindo a API com o Postman
 
-# 5. Reembolso — 200 (ou 202 PENDING_REFERENCE se a aposta ainda não chegou)
-curl -s -X POST $API/wagering/transactions -H "Authorization: Bearer $PROVIDER" -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: provider-a:refund-1' \
-  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"refund-1\",\"playerId\":\"$PLAYER\",
-       \"walletId\":\"$WALLET\",\"roundId\":\"round-987\",\"gameId\":\"fortune-chimp\",\"kind\":\"REFUND\",
-       \"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"},\"referenceExternalTransactionId\":\"transaction-123\"}"
+A forma recomendada de chamar a API é a collection
+[`postman/wagering.postman_collection.json`](postman/wagering.postman_collection.json). Ela já
+traz o roteiro completo, com tokens, cabeçalhos, corpos e variáveis configurados.
 
-# 6. Consultas
-curl -s $API/providers/provider-a/wagering/transactions/transaction-123 -H "Authorization: Bearer $PROVIDER"
-curl -s $API/wagering/transactions/<transactionId>                     -H "Authorization: Bearer $PROVIDER"
-curl -s "$API/wallets/$WALLET/ledger?limit=50"                          -H "Authorization: Bearer $INTERNAL"
-curl -s "$API/wallets/$WALLET/ledger?limit=50&cursor=<nextCursor>"      -H "Authorization: Bearer $INTERNAL"
-curl -s -X POST $API/wallets/$WALLET/reconciliation                     -H "Authorization: Bearer $INTERNAL"
-```
+### 1. Importar a collection
+
+1. Suba o ambiente (`docker compose up --build`) e aguarde as instâncias ficarem `healthy`.
+2. No Postman, clique em **Import** e selecione `postman/wagering.postman_collection.json`.
+3. A collection **Wagering API (local)** aparece na barra lateral. Não é preciso criar um
+   *environment*: tudo fica nas variáveis da própria collection.
+
+### 2. Variáveis da collection
+
+Abra a collection e vá na aba **Variables**:
+
+| Variável | Valor inicial | Preenchida por |
+| --- | --- | --- |
+| `baseUrl` | `http://localhost:8081` | você. Troque para `:8082` ou `:8083` para usar outra instância |
+| `keycloakUrl` | `http://localhost:8080` | você |
+| `internalToken`, `providerToken`, `providerBToken` | vazio | script da collection (tokens do Keycloak) |
+| `playerId`, `betId` | vazio | requisição `1. Abrir carteira` (valores novos a cada execução) |
+| `walletId` | vazio | resposta de `1. Abrir carteira` |
+| `transactionId` | vazio | resposta de `2. Aposta BET 25.00` |
+
+### 3. Enviar as requisições em ordem
+
+Envie as requisições **na ordem**, começando por `0. Health` e `1. Abrir carteira`. As
+seguintes dependem do `walletId` criado pela requisição 1. Se ela não tiver sido enviada, a aba
+**Test Results** mostra `Nenhuma carteira aberta: rode primeiro "1. Abrir carteira"`.
+
+| # | Requisição | Método e rota | Token | Resultado esperado |
+| --- | --- | --- | --- | --- |
+| 0 | Health (ready) | `GET /health/ready` | nenhum | `200`, `postgres` e `sqs` `UP` |
+| 1 | Abrir carteira (1000.00 BRL) | `POST /wallets` | interno | `201`, saldo `1000.00` |
+| 2 | Aposta BET 25.00 | `POST /wagering/transactions` | provider-a | `200` `PROCESSED`, saldo `975.00` |
+| 3 | Repetir a mesma aposta | `POST /wagering/transactions` | provider-a | `200`, `idempotentReplay: true`, saldo continua `975.00` |
+| 4 | Mesma chave, valor diferente | `POST /wagering/transactions` | provider-a | `409 IDEMPOTENCY_KEY_CONFLICT` |
+| 5 | Prêmio WIN 50.00 | `POST /wagering/transactions` | provider-a | `200`, saldo `1025.00` |
+| 6 | Perda LOSS 0.00 | `POST /wagering/transactions` | provider-a | `200`, saldo inalterado |
+| 7 | Reembolso REFUND da aposta | `POST /wagering/transactions` | provider-a | `200`, saldo `1050.00` (ou `202 PENDING_REFERENCE` se a aposta ainda não existir) |
+| 8 | Consultar carteira | `GET /wallets/{walletId}` | interno | `200` com o saldo atual |
+| 9 | Extrato (ledger) | `GET /wallets/{walletId}/ledger?limit=50` | interno | `200` com os lançamentos, do mais recente ao mais antigo |
+| 10 | Reconciliação | `POST /wallets/{walletId}/reconciliation` | interno | `200`, `consistent: true`, diferença `0.00` |
+| 11 | Transação por id interno | `GET /wagering/transactions/{transactionId}` | provider-a | `200` com os dados da aposta |
+| 12 | Transação por provedor + id externo | `GET /providers/provider-a/wagering/transactions/{betId}` | provider-a | `200` com os dados da aposta |
+| 13 | provider-b lendo transação do provider-a | `GET /wagering/transactions/{transactionId}` | provider-b | acesso negado (`403` ou `404`) |
+
+As requisições com verificação automática (1 a 4 e 13) mostram o resultado na aba
+**Test Results**. Cada envio de `1. Abrir carteira` cria um jogador novo, então o roteiro pode
+ser repetido do início quantas vezes quiser.
+
+### 4. Montar suas próprias chamadas
+
+Para testar outros cenários, duplique uma requisição (**Duplicate**) e altere o corpo na aba
+**Body**. Pontos de atenção nas operações (`POST /wagering/transactions`):
+
+- O cabeçalho `Idempotency-Key` identifica a operação. Use um valor novo para cada operação
+  nova; repetir a chave com o mesmo corpo devolve o resultado original, e com outro corpo
+  devolve `409`.
+- `kind` aceita `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK`. `REFUND` e `ROLLBACK` exigem
+  `referenceExternalTransactionId` com o `externalTransactionId` da operação desfeita.
+- Valores monetários vão como texto com duas casas decimais: `{"amount": "25.00", "currency": "BRL"}`.
+- Uma aposta maior que o saldo retorna `422` com `failureCode: INSUFFICIENT_FUNDS`.
+- Para paginar o extrato, copie o `nextCursor` da resposta e adicione `&cursor=<nextCursor>`
+  na URL da requisição `9. Extrato (ledger)`.
+- Para rastrear uma chamada nos logs, adicione o cabeçalho `X-Correlation-Id` na aba **Headers**.
 
 Códigos HTTP e corpos de cada situação (entrada inválida, conflito, rejeição de negócio,
 pendência, indisponibilidade transitória): [ARCHITECTURE.md §12](ARCHITECTURE.md#12-contrato-http).
 
-### Postman
+### Rodar a collection inteira de uma vez
 
-[`postman/wagering.postman_collection.json`](postman/wagering.postman_collection.json) traz o
-mesmo roteiro pronto: importe no Postman (**Import**) e envie as requisições **em ordem**,
-começando por `1. Abrir carteira`. Os tokens do Keycloak são obtidos e renovados pelo script da
-collection; `playerId`, `walletId` e os ids das operações ficam em variáveis da collection.
+- **No Postman:** clique nos três pontos da collection, escolha **Run collection** e depois
+  **Run Wagering API (local)**. As requisições são enviadas na ordem, com o resumo dos testes
+  no final.
+- **Pela linha de comando**, sem instalar Node, com o [Newman](https://github.com/postmanlabs/newman)
+  em container na rede do Compose (o nome da rede é `<projeto>_default`; por padrão, o
+  projeto tem o nome da pasta do repositório):
 
-Cada execução de `1. Abrir carteira` cria um jogador novo, então o roteiro pode ser repetido do
-início. As requisições cobrem aposta, replay idempotente, conflito de chave (`409`), `WIN`,
-`LOSS`, `REFUND`, carteira, ledger, reconciliação, consultas de transação e o isolamento entre
-provedores. Para usar outra instância, altere a variável `baseUrl` (`http://localhost:8082`).
-
-Pela linha de comando, sem instalar Node, com o [Newman](https://github.com/postmanlabs/newman)
-em container na rede do Compose:
-
-```sh
-docker run --rm --network backend-challenge-go_default -v "$PWD/postman:/etc/newman" \
-  postman/newman:alpine run wagering.postman_collection.json \
-  --env-var baseUrl=http://api-1:8080 --env-var keycloakUrl=http://keycloak:8080
-```
+  ```sh
+  docker run --rm --network gaming-challenge-go_default -v "$PWD/postman:/etc/newman" \
+    postman/newman:alpine run wagering.postman_collection.json \
+    --env-var baseUrl=http://api-1:8080 --env-var keycloakUrl=http://keycloak:8080
+  ```
 
 ## Mensagens SQS de exemplo
 
@@ -328,7 +358,7 @@ recupera); `docker compose stop -t 30 api-2` (SIGTERM: drena o trabalho em andam
   `transactionId`, `walletId`, `providerId`. Envie `X-Correlation-Id` para rastrear uma chamada.
 - Métricas Prometheus em `:9100/metrics` de cada instância (lista em
   [ARCHITECTURE.md §15](ARCHITECTURE.md#15-observabilidade)):
-  `curl -s localhost:9101/metrics | grep ^wagering_`
+  abra http://localhost:9101/metrics no navegador (as métricas do serviço começam com `wagering_`).
 - Health: `/health/live` e `/health/ready` (PostgreSQL + SQS).
 
 ## Estrutura do repositório
