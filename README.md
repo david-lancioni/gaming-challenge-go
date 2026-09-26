@@ -8,8 +8,29 @@ persistente, ledger append-only, *inbox/outbox* e autenticação OAuth 2.0/OIDC 
 - Enunciado original: [CHALLENGE.md](CHALLENGE.md)
 - Decisões, contratos, máquina de estados, limitações: [ARCHITECTURE.md](ARCHITECTURE.md)
 
+## Testar em 2 passos
+
+Testar o serviço é tão simples quanto:
+
+1. **Subir tudo:** com o Docker Desktop aberto, rode na raiz do projeto (prompt do Windows):
+
+   ```bat
+   startup.bat
+   ```
+
+   O script mostra um aviso para você remover containers antigos que usem as mesmas portas,
+   espera o ENTER, sobe tudo e só termina quando a API está respondendo.
+
+2. **Chamar a API:** no Postman, clique em **Import**, selecione
+   [`postman/wagering.postman_collection.json`](postman/wagering.postman_collection.json) e envie
+   as requisições em ordem (ou use **Run collection**). Tokens, cabeçalhos e variáveis já vêm
+   configurados.
+
+Pronto. Para parar e limpar: `startup.bat stop`. O resto deste documento é detalhe.
+
 ## Sumário
 
+0. [Testar em 2 passos](#testar-em-2-passos)
 1. [Pré-requisitos](#pré-requisitos)
 2. [Início rápido](#início-rápido)
 3. [Variáveis de ambiente](#variáveis-de-ambiente)
@@ -37,6 +58,17 @@ Não é preciso instalar mais nada: PostgreSQL, LocalStack (SQS) e Keycloak roda
 
 ## Início rápido
 
+No Windows:
+
+```bat
+startup.bat          :: sobe tudo no Docker e espera a API ficar pronta
+startup.bat logs     :: acompanha os logs
+startup.bat stop     :: para tudo e apaga os volumes
+startup.bat local    :: dependências no Docker, serviço Go rodando no host
+```
+
+Em qualquer sistema, o equivalente é:
+
 ```sh
 docker compose up --build
 ```
@@ -61,7 +93,7 @@ SQS, publica o outbox e retoma pendências. Para verificar, envie a requisição
 http://localhost:8081/health/ready no navegador. A resposta esperada é
 `{"checks":{"postgres":"UP","sqs":"UP"},"status":"UP"}`.
 
-Para parar e limpar: `docker compose down -v`.
+Para parar e limpar: `startup.bat stop` (ou `docker compose down -v`).
 
 ## Variáveis de ambiente
 
@@ -182,7 +214,8 @@ traz o roteiro completo, com tokens, cabeçalhos, corpos e variáveis configurad
 
 ### 1. Importar a collection
 
-1. Suba o ambiente (`docker compose up --build`) e aguarde as instâncias ficarem `healthy`.
+1. Suba o ambiente com `startup.bat` (ou `docker compose up --build` e aguarde as instâncias
+   ficarem `healthy`).
 2. No Postman, clique em **Import** e selecione `postman/wagering.postman_collection.json`.
 3. A collection **Wagering API (local)** aparece na barra lateral. Não é preciso criar um
    *environment*: tudo fica nas variáveis da própria collection.
@@ -379,13 +412,17 @@ migrations/              SQL versionado (up/down) embutido no binário
 deploy/keycloak/         realm importado automaticamente
 postman/                 collection do Postman com o roteiro de chamadas
 test/integration/        testes com PostgreSQL, Keycloak, LocalStack e processos reais
+startup.bat              sobe/para o ambiente no Windows (docker | local | stop | logs)
 ```
 
 ## Solução de problemas
 
 - **`go test -race` falha com "-race requires cgo"**: instale um compilador C ou use
   `docker compose --profile tests run --rm tests`.
-- **Porta em uso** (5432, 8080, 4566): pare o serviço local ou altere os mapeamentos no Compose.
+- **Porta em uso / `port is already allocated`** (5432, 4566, 8080, 8081-8083, 9101-9103):
+  geralmente é um container antigo (por exemplo, de uma cópia anterior do projeto com outro
+  nome). Liste com `docker ps -a` e remova com `docker compose -p NOME_DO_PROJETO down`; se for
+  um serviço local, pare-o ou altere os mapeamentos no Compose.
 - **Testes de integração dizem "dependencies are not available"**: rode
   `docker compose up -d postgres localstack keycloak` e aguarde `healthy`
   (`docker compose ps`); o Keycloak leva ~20–40 s na primeira subida.
